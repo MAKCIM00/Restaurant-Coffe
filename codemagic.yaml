@@ -1,13 +1,14 @@
 workflows:
   ios_build:
-    name: Build Coffee App iOS
-    max_build_duration: 60
-    instance_type: mac_mini_m2
-
+    name: Build Coffee App iOS — Рабочая версия 2025
+    max_build_duration: 120
+    instance_type: mac_mini_m2                     # Самый стабильный и быстрый
     environment:
       flutter: stable
-      xcode: latest
+      xcode: latest                                 # Всегда свежий Xcode
       cocoapods: default
+      groups:
+        - apple_credentials                         # ← Добавь сюда свой Apple ID / сертификаты
 
     triggering:
       events:
@@ -16,30 +17,56 @@ workflows:
       branch_patterns:
         - pattern: '**'
           include: true
+          source: true
 
+    # Отключаем кэш — он часто ломает iOS-сборку после правок pubspec.yaml и Podfile
     cache:
-      cache_paths:
-        - ios/Pods
-        - .pub-cache
-        - $HOME/.cocoapods/repos
+      disabled: true
 
     scripts:
-      - name: Get Flutter packages
+      # 1. Полная очистка перед сборкой — КРИТИЧНО!
+      - name: Flutter Clean + Pub Get
         script: |
+          flutter clean
           flutter pub get
 
-      - name: Install iOS pods
+      # 2. Удаляем старые проблемные файлы
+      - name: Удаляем Generated.xcconfig и кэш CocoaPods
+        script: |
+          rm -f ios/Flutter/Generated.xcconfig
+          rm -rf ios/Pods
+          rm -rf ios/.symlinks
+          rm -f ios/Podfile.lock
+
+      # 3. Устанавливаем поды с полной переустановкой
+      - name: Pod Install (с принудительным обновлением)
         script: |
           cd ios
-          pod repo update
+          pod repo update || true
           pod install --repo-update
 
-      - name: Build iOS
+      # 4. Сборка .ipa с кодсайном (обязательно для установки!)
+      - name: Build iOS IPA (с кодсайном!)
         script: |
-          flutter build ios --release --no-codesign
+          flutter build ios --release
+          # Если используешь автоматическую подпись в Codemagic — оставь так:
+          xcodebuild -workspace Runner.xcworkspace \
+                     -scheme Runner \
+                     -configuration Release \
+                     -archivePath build/ios.xcarchive \
+                     -allowProvisioningUpdates \
+                     archive
+          xcodebuild -archivePath build/ios.xcarchive \
+                     -exportOptionsPlist ExportOptions.plist \
+                     -exportPath build/ipa \
+                     -allowProvisioningUpdates \
+                     exportArchive
 
     artifacts:
-      - build/ios/ipa/*.ipa
+      - build/ipa/*.ipa
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+      - flutter_drive.log
 
     publishing:
       email:
@@ -48,3 +75,17 @@ workflows:
         notify:
           success: true
           failure: true
+      slack:
+        channel: "#flutter-builds"
+        notify_on_build_start: false
+
+      # Автоматическая загрузка в Diawi (чтобы сразу получить ссылку на установку)
+      scripts:
+        - name: Загрузка на Diawi.com (ссылка придёт на почту)
+          script: |
+            curl "https://upload.diawi.com/" \
+              -F token="ТВОЙ_ТОКЕН_DIAWI_ЗДЕСЬ" \
+              -F file=@build/ipa/*.ipa \
+              -F find_by_udid=0 \
+              -F comment="Coffee App — автосборка Codemagic" | jq -r '.link' | tee diawi_link.txt
+            echo "Ссылка на установку: $(cat diawi_link.txt)"
